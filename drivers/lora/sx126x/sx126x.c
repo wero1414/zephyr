@@ -922,6 +922,392 @@ static uint32_t sx126x_lora_airtime(const struct device *dev, uint32_t data_len)
 	return (t_preamble_us + t_payload_us + 500) / 1000;
 }
 
+/* ============================================ */
+/* FSK/GFSK Functions                           */
+/* ============================================ */
+
+static int sx126x_set_fsk_modulation_params(const struct device *dev,
+					    uint32_t bitrate, uint32_t fdev,
+					    uint8_t shaping, uint8_t bandwidth)
+{
+	uint8_t buf[8];
+	uint32_t br_reg = SX126X_FSK_BITRATE_TO_REG(bitrate);
+	uint32_t fdev_reg = SX126X_FSK_FDEV_TO_REG(fdev);
+
+	/* Bitrate: 3 bytes MSB first */
+	buf[0] = (br_reg >> 16) & 0xFF;
+	buf[1] = (br_reg >> 8) & 0xFF;
+	buf[2] = br_reg & 0xFF;
+	/* Pulse shaping */
+	buf[3] = shaping;
+	/* RX Bandwidth */
+	buf[4] = bandwidth;
+	/* Frequency deviation: 3 bytes MSB first */
+	buf[5] = (fdev_reg >> 16) & 0xFF;
+	buf[6] = (fdev_reg >> 8) & 0xFF;
+	buf[7] = fdev_reg & 0xFF;
+
+	return sx126x_hal_write_cmd(dev, SX126X_CMD_SET_MODULATION_PARAMS, buf, 8);
+}
+
+static int sx126x_set_fsk_packet_params(const struct device *dev,
+					uint16_t preamble_len,
+					uint8_t preamble_detect,
+					uint8_t sync_word_len,
+					uint8_t addr_comp,
+					uint8_t packet_type,
+					uint8_t payload_len,
+					uint8_t crc_type,
+					uint8_t whitening)
+{
+	uint8_t buf[9];
+
+	sys_put_be16(preamble_len, &buf[0]);
+	buf[2] = preamble_detect;
+	buf[3] = sync_word_len;    /* Sync word length in bits (0-64) */
+	buf[4] = addr_comp;
+	buf[5] = packet_type;      /* Fixed or variable length */
+	buf[6] = payload_len;
+	buf[7] = crc_type;
+	buf[8] = whitening;
+
+	return sx126x_hal_write_cmd(dev, SX126X_CMD_SET_PACKET_PARAMS, buf, 9);
+}
+
+static int sx126x_set_fsk_sync_word(const struct device *dev,
+				    const uint8_t *sync_word, uint8_t len)
+{
+	if (len > 8) {
+		len = 8;
+	}
+	return sx126x_hal_write_regs(dev, SX126X_REG_FSK_SYNC_WORD_0, sync_word, len);
+}
+
+static int sx126x_set_fsk_whitening_seed(const struct device *dev, uint16_t seed)
+{
+	uint8_t buf[2];
+
+	buf[0] = (seed >> 8) & 0x01; /* Only 1 bit for MSB */
+	buf[1] = seed & 0xFF;
+
+	return sx126x_hal_write_regs(dev, SX126X_REG_FSK_WHITENING_MSB, buf, 2);
+}
+
+static int sx126x_set_fsk_crc_params(const struct device *dev,
+				     uint16_t crc_init, uint16_t crc_poly)
+{
+	uint8_t buf[2];
+	int ret;
+
+	/* CRC Initial value */
+	sys_put_be16(crc_init, buf);
+	ret = sx126x_hal_write_regs(dev, SX126X_REG_FSK_CRC_INIT_MSB, buf, 2);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* CRC Polynomial */
+	sys_put_be16(crc_poly, buf);
+	return sx126x_hal_write_regs(dev, SX126X_REG_FSK_CRC_POLY_MSB, buf, 2);
+}
+
+/**
+ * @brief Configure SX126x for FSK/GFSK modulation
+ *
+ * @param dev Device instance
+ * @param frequency RF frequency in Hz
+ * @param bitrate Bit rate in bps (e.g., 50000 for 50 kbps)
+ * @param fdev Frequency deviation in Hz (e.g., 25000 for 25 kHz)
+ * @param bandwidth RX bandwidth (use SX126X_FSK_BW_* constants)
+ * @param tx_power TX power in dBm
+ * @return 0 on success, negative error code otherwise
+ */
+int sx126x_fsk_config(const struct device *dev,
+		      uint32_t frequency, uint32_t bitrate,
+		      uint32_t fdev, uint8_t bandwidth, int8_t tx_power)
+{
+	struct sx126x_data *data = dev->data;
+	int ret;
+
+	k_mutex_lock(&data->lock, K_FOREVER);
+
+	/* Set packet type to FSK/GFSK */
+	ret = sx126x_set_packet_type(dev, SX126X_PACKET_TYPE_GFSK);
+	if (ret < 0) {
+		LOG_ERR("Set FSK packet type failed: %d", ret);
+		goto out;
+	}
+
+	/* Run image calibration for frequency band */
+	ret = sx126x_calibrate_image(dev, frequency);
+	if (ret < 0) {
+		goto out;
+	}
+
+	/* Set RF frequency */
+	ret = sx126x_set_rf_frequency(dev, frequency);
+	if (ret < 0) {
+		goto out;
+	}
+
+	/* Configure PA and TX power */
+	ret = sx126x_configure_pa_and_tx_params(dev, tx_power, frequency,
+						SX126X_RAMP_40_US);
+	if (ret < 0) {
+		goto out;
+	}
+
+	/* Set FSK modulation parameters with Gaussian BT=0.5 */
+	ret = sx126x_set_fsk_modulation_params(dev, bitrate, fdev,
+					       SX126X_FSK_MOD_SHAPING_G_BT_05,
+					       bandwidth);
+	if (ret < 0) {
+		goto out;
+	}
+
+	/* Configure IRQs for FSK: TX done, RX done, timeout, sync word valid */
+	uint16_t irq_mask = SX126X_IRQ_TX_DONE | SX126X_IRQ_RX_DONE |
+			    SX126X_IRQ_RX_TX_TIMEOUT | SX126X_IRQ_CRC_ERR |
+			    SX126X_IRQ_SYNC_WORD_VALID;
+	ret = sx126x_set_dio_irq_params(dev, irq_mask, irq_mask, 0, 0);
+	if (ret < 0) {
+		goto out;
+	}
+
+	LOG_DBG("FSK Config: freq=%u, bitrate=%u, fdev=%u, bw=0x%02x, power=%d",
+		frequency, bitrate, fdev, bandwidth, tx_power);
+
+out:
+	k_mutex_unlock(&data->lock);
+	return ret;
+}
+
+/**
+ * @brief Set FSK packet parameters
+ *
+ * @param dev Device instance
+ * @param preamble_len Preamble length in bytes
+ * @param sync_word Sync word bytes (up to 8 bytes)
+ * @param sync_word_len Sync word length in bytes
+ * @param fixed_len True for fixed length packets, false for variable
+ * @param payload_len Payload length (for fixed) or max length (for variable)
+ * @param crc_on Enable CRC
+ * @param whitening Enable whitening (DC-free encoding)
+ * @return 0 on success, negative error code otherwise
+ */
+int sx126x_fsk_set_packet_params(const struct device *dev,
+				 uint16_t preamble_len,
+				 const uint8_t *sync_word, uint8_t sync_word_len,
+				 bool fixed_len, uint8_t payload_len,
+				 bool crc_on, bool whitening)
+{
+	struct sx126x_data *data = dev->data;
+	int ret;
+
+	k_mutex_lock(&data->lock, K_FOREVER);
+
+	/* Set sync word */
+	if (sync_word != NULL && sync_word_len > 0) {
+		ret = sx126x_set_fsk_sync_word(dev, sync_word, sync_word_len);
+		if (ret < 0) {
+			goto out;
+		}
+	}
+
+	/* Set packet parameters */
+	ret = sx126x_set_fsk_packet_params(dev,
+					   preamble_len * 8, /* Convert bytes to bits */
+					   SX126X_FSK_PREAMBLE_DETECT_16_BITS,
+					   sync_word_len * 8, /* Convert bytes to bits */
+					   SX126X_FSK_ADDR_FILT_OFF,
+					   fixed_len ? SX126X_FSK_PACKET_FIXED_LENGTH :
+						       SX126X_FSK_PACKET_VARIABLE_LENGTH,
+					   payload_len,
+					   crc_on ? SX126X_FSK_CRC_2_BYTE : SX126X_FSK_CRC_OFF,
+					   whitening ? SX126X_FSK_DC_FREEWHITENING :
+						       SX126X_FSK_DC_FREE_OFF);
+	if (ret < 0) {
+		goto out;
+	}
+
+	/* Set default whitening seed if whitening enabled */
+	if (whitening) {
+		ret = sx126x_set_fsk_whitening_seed(dev, 0x01FF);
+		if (ret < 0) {
+			goto out;
+		}
+	}
+
+	/* Set default CRC params (CCITT) if CRC enabled */
+	if (crc_on) {
+		ret = sx126x_set_fsk_crc_params(dev, 0xFFFF, 0x1021);
+	}
+
+out:
+	k_mutex_unlock(&data->lock);
+	return ret;
+}
+
+/**
+ * @brief Send data using FSK modulation
+ *
+ * @param dev Device instance
+ * @param data_buf Data buffer to send
+ * @param data_len Data length in bytes
+ * @return 0 on success, negative error code otherwise
+ */
+int sx126x_fsk_send(const struct device *dev, uint8_t *data_buf, uint32_t data_len)
+{
+	struct sx126x_data *data = dev->data;
+	struct sx126x_tx_result result;
+	int ret;
+
+	if (data_len > SX126X_MAX_PAYLOAD_LEN) {
+		LOG_ERR("FSK payload too long: %u", data_len);
+		return -EINVAL;
+	}
+
+	if (!atomic_cas(&data->state, SX126X_STATE_IDLE, SX126X_STATE_TX)) {
+		LOG_ERR("Busy");
+		return -EBUSY;
+	}
+
+	k_mutex_lock(&data->lock, K_FOREVER);
+	k_msgq_purge(&data->tx_msgq);
+
+	/* Write payload to buffer */
+	ret = sx126x_hal_write_buffer(dev, 0x00, data_buf, data_len);
+	if (ret < 0) {
+		goto out_error;
+	}
+
+	/* Enable antenna and set TX path */
+	sx126x_set_rf_path(dev, true, true);
+
+	/* Start transmission with 5 second timeout */
+	ret = sx126x_set_tx(dev, 5000);
+	if (ret < 0) {
+		goto out_error;
+	}
+
+	k_mutex_unlock(&data->lock);
+
+	/* Wait for TX completion */
+	ret = k_msgq_get(&data->tx_msgq, &result, K_SECONDS(10));
+	if (ret < 0) {
+		LOG_ERR("FSK TX timeout");
+		atomic_set(&data->state, SX126X_STATE_IDLE);
+		return -ETIMEDOUT;
+	}
+
+	return result.status;
+
+out_error:
+	k_mutex_unlock(&data->lock);
+	atomic_set(&data->state, SX126X_STATE_IDLE);
+	return ret;
+}
+
+/**
+ * @brief Receive data using FSK modulation
+ *
+ * @param dev Device instance
+ * @param data_buf Buffer for received data
+ * @param size Buffer size
+ * @param timeout Reception timeout
+ * @param rssi Pointer to store RSSI (can be NULL)
+ * @return Number of bytes received on success, negative error code otherwise
+ */
+int sx126x_fsk_recv(const struct device *dev, uint8_t *data_buf,
+		    uint8_t size, k_timeout_t timeout, int16_t *rssi)
+{
+	struct sx126x_data *data = dev->data;
+	struct sx126x_rx_result result;
+	uint32_t timeout_ms;
+	int ret;
+
+	if (!atomic_cas(&data->state, SX126X_STATE_IDLE, SX126X_STATE_RX)) {
+		LOG_ERR("Busy");
+		return -EBUSY;
+	}
+
+	k_mutex_lock(&data->lock, K_FOREVER);
+	data->rx_cb = NULL;
+	k_msgq_purge(&data->rx_msgq);
+
+	/* Enable antenna and set RX path */
+	sx126x_set_rf_path(dev, true, false);
+
+	/* Start reception */
+	timeout_ms = K_TIMEOUT_EQ(timeout, K_FOREVER)
+		     ? 0 : k_ticks_to_ms_ceil32(timeout.ticks);
+	ret = sx126x_set_rx(dev, timeout_ms);
+	if (ret < 0) {
+		sx126x_set_rf_path(dev, false, false);
+		k_mutex_unlock(&data->lock);
+		atomic_set(&data->state, SX126X_STATE_IDLE);
+		return ret;
+	}
+
+	k_mutex_unlock(&data->lock);
+
+	/* Wait for RX completion */
+	ret = k_msgq_get(&data->rx_msgq, &result, timeout);
+	if (ret < 0) {
+		LOG_DBG("FSK RX timeout");
+		atomic_set(&data->state, SX126X_STATE_IDLE);
+		sx126x_set_standby(dev, SX126X_STANDBY_RC);
+		sx126x_set_rf_path(dev, false, false);
+		return -EAGAIN;
+	}
+
+	/* Copy received data from shared buffer */
+	if (result.status > 0) {
+		int copy_len = MIN(result.status, size);
+
+		memcpy(data_buf, data->rx_buf, copy_len);
+		if (rssi != NULL) {
+			*rssi = result.rssi;
+		}
+		return copy_len;
+	}
+
+	return result.status;
+}
+
+/**
+ * @brief Switch back to LoRa modulation
+ *
+ * @param dev Device instance
+ * @return 0 on success, negative error code otherwise
+ */
+int sx126x_set_lora_mode(const struct device *dev)
+{
+	struct sx126x_data *data = dev->data;
+	int ret;
+
+	k_mutex_lock(&data->lock, K_FOREVER);
+
+	ret = sx126x_set_packet_type(dev, SX126X_PACKET_TYPE_LORA);
+	if (ret < 0) {
+		LOG_ERR("Set LoRa packet type failed: %d", ret);
+	}
+
+	/* Reconfigure IRQs for LoRa */
+	uint16_t irq_mask = SX126X_IRQ_TX_DONE | SX126X_IRQ_RX_DONE |
+			    SX126X_IRQ_RX_TX_TIMEOUT | SX126X_IRQ_CRC_ERR;
+	sx126x_set_dio_irq_params(dev, irq_mask, irq_mask, 0, 0);
+
+	data->config_valid = false; /* Require reconfiguration */
+
+	k_mutex_unlock(&data->lock);
+	return ret;
+}
+
+/* ============================================ */
+/* LoRa Standard API Functions                  */
+/* ============================================ */
+
 static int sx126x_lora_test_cw(const struct device *dev, uint32_t frequency,
 			       int8_t tx_power, uint16_t duration)
 {

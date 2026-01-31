@@ -60,6 +60,78 @@ struct sx126x_data {
 	/* Deferred work for interrupt handling */
 	struct k_work irq_work;
 	const struct device *dev;
+
+	/* Current modulation type */
+	uint8_t current_modulation;
 };
+
+/* ============================================ */
+/* FSK/GFSK Public API                          */
+/* ============================================ */
+
+/**
+ * @brief Configure SX126x for FSK/GFSK modulation
+ *
+ * @param dev Device instance
+ * @param frequency RF frequency in Hz
+ * @param bitrate Bit rate in bps (e.g., 50000 for 50 kbps)
+ * @param fdev Frequency deviation in Hz (e.g., 25000 for 25 kHz)
+ * @param bandwidth RX bandwidth (use SX126X_FSK_BW_* constants)
+ * @param tx_power TX power in dBm
+ * @return 0 on success, negative error code otherwise
+ */
+int sx126x_fsk_config(const struct device *dev,
+		      uint32_t frequency, uint32_t bitrate,
+		      uint32_t fdev, uint8_t bandwidth, int8_t tx_power);
+
+/**
+ * @brief Set FSK packet parameters
+ *
+ * @param dev Device instance
+ * @param preamble_len Preamble length in bytes
+ * @param sync_word Sync word bytes (up to 8 bytes)
+ * @param sync_word_len Sync word length in bytes
+ * @param fixed_len True for fixed length packets, false for variable
+ * @param payload_len Payload length (for fixed) or max length (for variable)
+ * @param crc_on Enable CRC
+ * @param whitening Enable whitening (DC-free encoding)
+ * @return 0 on success, negative error code otherwise
+ */
+int sx126x_fsk_set_packet_params(const struct device *dev,
+				 uint16_t preamble_len,
+				 const uint8_t *sync_word, uint8_t sync_word_len,
+				 bool fixed_len, uint8_t payload_len,
+				 bool crc_on, bool whitening);
+
+/**
+ * @brief Send data using FSK modulation
+ *
+ * @param dev Device instance
+ * @param data_buf Data buffer to send
+ * @param data_len Data length in bytes
+ * @return 0 on success, negative error code otherwise
+ */
+int sx126x_fsk_send(const struct device *dev, uint8_t *data_buf, uint32_t data_len);
+
+/**
+ * @brief Receive data using FSK modulation
+ *
+ * @param dev Device instance
+ * @param data_buf Buffer for received data
+ * @param size Buffer size
+ * @param timeout Reception timeout
+ * @param rssi Pointer to store RSSI (can be NULL)
+ * @return Number of bytes received on success, negative error code otherwise
+ */
+int sx126x_fsk_recv(const struct device *dev, uint8_t *data_buf,
+		    uint8_t size, k_timeout_t timeout, int16_t *rssi);
+
+/**
+ * @brief Switch back to LoRa modulation
+ *
+ * @param dev Device instance
+ * @return 0 on success, negative error code otherwise
+ */
+int sx126x_set_lora_mode(const struct device *dev);
 
 #endif /* ZEPHYR_DRIVERS_LORA_SX126X_SX126X_INTERNAL_H_ */
