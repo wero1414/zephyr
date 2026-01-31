@@ -46,7 +46,6 @@ target_include_directories(boot_stage2 PUBLIC
 
 target_link_options(boot_stage2 PRIVATE
   "-nostartfiles"
-  "--specs=picolibc.specs"
   "-T${boot_stage_dir}/boot_stage2.ld"
   )
 
