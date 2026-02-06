@@ -47,6 +47,24 @@ struct sx126x_data {
 	struct k_msgq rx_msgq;
 	struct sx126x_rx_result rx_result;
 
+	/* FSK/GFSK Configuration storage */
+	struct {
+		uint32_t bitrate;
+		uint32_t fdev;
+		uint32_t frequency;     /* Added: Store frequency for restoration */
+		uint8_t bandwidth;
+		uint8_t shaping;
+		uint16_t preamble_len;
+		uint8_t preamble_detect;
+		uint8_t sync_word_len;
+		uint8_t addr_comp;
+		uint8_t packet_type;
+		uint8_t payload_len;
+		uint8_t crc_type;
+		uint8_t whitening;
+		int8_t tx_power;        /* Added: Store TX power for restoration */
+	} fsk_config;
+
 	/* RX data buffer (shared between IRQ handler and recv) */
 	uint8_t rx_buf[SX126X_MAX_PAYLOAD_LEN];
 
@@ -63,6 +81,9 @@ struct sx126x_data {
 
 	/* Current modulation type */
 	uint8_t current_modulation;
+
+	/* Debug info for manual troubleshooting */
+	char debug_info[128];
 };
 
 /* ============================================ */
@@ -133,5 +154,14 @@ int sx126x_fsk_recv(const struct device *dev, uint8_t *data_buf,
  * @return 0 on success, negative error code otherwise
  */
 int sx126x_set_lora_mode(const struct device *dev);
+
+/**
+ * @brief Set LoRa Sync Word
+ *
+ * @param dev Device instance
+ * @param sync_word 16-bit Sync Word (e.g. 0x1424 for private, 0x3444 for public)
+ * @return 0 on success, negative error code otherwise
+ */
+int sx126x_set_lora_sync_word(const struct device *dev, uint16_t sync_word);
 
 #endif /* ZEPHYR_DRIVERS_LORA_SX126X_SX126X_INTERNAL_H_ */
