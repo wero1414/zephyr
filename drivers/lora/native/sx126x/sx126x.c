@@ -1894,14 +1894,50 @@ static int sx126x_lora_test_cw(const struct device *dev, uint32_t frequency,
 	return 0;
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * sx126x_lora_get_rssi_inst  (lora_driver_api::get_rssi_inst)
+ *
+ * Read the instantaneous RSSI while the radio is in RX mode.
+ * SX1262 datasheet §13.5.7 GetRssiInst (opcode 0x15): returns one byte;
+ * RSSI [dBm] = -(raw / 2).
+ *
+ * The radio must already be in RX mode before calling this function.
+ * Allow ~500 µs after lora_config() for the PLL to settle.
+ * ────────────────────────────────────────────────────────────────────────── */
+static int sx126x_lora_get_rssi_inst(const struct device *dev, int8_t *rssi_dbm)
+{
+	uint8_t raw;
+	int ret;
+
+	/* GetRssiInst only returns valid energy data when the radio is actively
+	 * receiving.  Put it into continuous RX (timeout=0), wait for the PLL
+	 * to lock (~500 µs is enough), read the register, then return to
+	 * standby so the caller can reconfigure freely. */
+	ret = sx126x_set_rx(dev, 0);
+	if (ret < 0) {
+		return ret;
+	}
+
+	k_usleep(500);
+
+	ret = sx126x_hal_read_cmd(dev, SX126X_CMD_GET_RSSI_INST, &raw, 1);
+	if (ret == 0) {
+		*rssi_dbm = -(int8_t)(raw >> 1);
+	}
+
+	sx126x_set_standby(dev, SX126X_STANDBY_RC);
+	return ret;
+}
+
 static DEVICE_API(lora, sx126x_lora_api) = {
-	.config = sx126x_lora_config,
-	.send = sx126x_lora_send,
-	.send_async = sx126x_lora_send_async,
-	.recv = sx126x_lora_recv,
-	.recv_async = sx126x_lora_recv_async,
-	.airtime = sx126x_lora_airtime,
-	.test_cw = sx126x_lora_test_cw,
+	.config        = sx126x_lora_config,
+	.send          = sx126x_lora_send,
+	.send_async    = sx126x_lora_send_async,
+	.recv          = sx126x_lora_recv,
+	.recv_async    = sx126x_lora_recv_async,
+	.airtime       = sx126x_lora_airtime,
+	.test_cw       = sx126x_lora_test_cw,
+	.get_rssi_inst = sx126x_lora_get_rssi_inst,
 };
 
 static int sx126x_init(const struct device *dev)

@@ -484,6 +484,14 @@ typedef int (*lora_api_recv_duty_cycle)(const struct device *dev,
 typedef int (*lora_api_test_cw)(const struct device *dev, uint32_t frequency,
 				int8_t tx_power, uint16_t duration);
 
+/**
+ * @typedef lora_api_get_rssi_inst()
+ * @brief Callback API for reading the instantaneous RSSI
+ *
+ * @see lora_get_rssi_inst() for argument descriptions.
+ */
+typedef int (*lora_api_get_rssi_inst)(const struct device *dev, int8_t *rssi_dbm);
+
 __subsystem struct lora_driver_api {
 	lora_api_config config;
 	lora_api_airtime airtime;
@@ -495,6 +503,7 @@ __subsystem struct lora_driver_api {
 	lora_api_cad_async cad_async;
 	lora_api_recv_duty_cycle recv_duty_cycle;
 	lora_api_test_cw test_cw;
+	lora_api_get_rssi_inst get_rssi_inst;
 };
 
 /** @endcond */
@@ -741,6 +750,31 @@ static inline int lora_test_cw(const struct device *dev, uint32_t frequency,
 	}
 
 	return api->test_cw(dev, frequency, tx_power, duration);
+}
+
+/**
+ * @brief Read the instantaneous RSSI
+ *
+ * Returns the current signal level seen by the receiver. The radio must
+ * already be in RX mode (e.g. after a call to @ref lora_recv_async) before
+ * calling this function. Allow at least ~500 µs after @ref lora_config for
+ * the PLL to settle before the reading is meaningful.
+ *
+ * @param dev       LoRa device
+ * @param rssi_dbm  Output: signal level in dBm
+ * @return 0 on success, -ENOSYS if the driver does not support this,
+ *         negative errno on error
+ */
+static inline int lora_get_rssi_inst(const struct device *dev, int8_t *rssi_dbm)
+{
+	const struct lora_driver_api *api =
+		(const struct lora_driver_api *)dev->api;
+
+	if (api->get_rssi_inst == NULL) {
+		return -ENOSYS;
+	}
+
+	return api->get_rssi_inst(dev, rssi_dbm);
 }
 
 #ifdef __cplusplus
