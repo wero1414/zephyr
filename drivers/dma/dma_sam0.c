@@ -209,9 +209,15 @@ static int dma_sam0_config(const struct device *dev, uint32_t channel,
 		goto inval;
 	}
 
-	/* Set up the one and only block */
+	/* Set up the one and only block; a cyclic transfer links the
+	 * descriptor to itself so the channel restarts the block on its own.
+	 */
 	desc->BTCNT.reg = block->block_size / config->source_data_size;
-	desc->DESCADDR.reg = 0;
+	desc->DESCADDR.reg = config->cyclic ? (uint32_t)desc : 0;
+	if (config->cyclic) {
+		/* Linked blocks only interrupt when asked to per block */
+		btctrl.bit.BLOCKACT = DMAC_BTCTRL_BLOCKACT_INT_Val;
+	}
 
 	/* Set the automatic source / dest increment */
 	switch (block->source_addr_adj) {
