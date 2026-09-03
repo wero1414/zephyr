@@ -302,6 +302,63 @@ static int dma_sam0_start(const struct device *dev, uint32_t channel)
 	return 0;
 }
 
+/* Suspend a channel: the controller finishes the current beat and updates
+ * the write-back descriptor, so dma_get_status() reports exact progress.
+ */
+static int dma_sam0_suspend(const struct device *dev, uint32_t channel)
+{
+	unsigned int key = irq_lock();
+
+	ARG_UNUSED(dev);
+
+#ifdef DMAC_CHID_ID
+	DMA_REGS->CHID.reg = channel;
+	DMA_REGS->CHCTRLB.reg = (DMA_REGS->CHCTRLB.reg & ~DMAC_CHCTRLB_CMD_Msk) |
+				DMAC_CHCTRLB_CMD_SUSPEND;
+	/* Wait for the channel to actually suspend (end of current beat) so
+	 * the write-back descriptor is valid when the caller reads status.
+	 * The flag never sets for an idle/disabled channel; bound the wait.
+	 */
+	for (int i = 0; i < 64; i++) {
+		if (DMA_REGS->CHINTFLAG.bit.SUSP) {
+			DMA_REGS->CHINTFLAG.reg = DMAC_CHINTFLAG_SUSP;
+			break;
+		}
+	}
+#else
+	DMA_REGS->Channel[channel].CHCTRLB.reg = DMAC_CHCTRLB_CMD_SUSPEND;
+	for (int i = 0; i < 64; i++) {
+		if (DMA_REGS->Channel[channel].CHINTFLAG.bit.SUSP) {
+			DMA_REGS->Channel[channel].CHINTFLAG.reg = DMAC_CHINTFLAG_SUSP;
+			break;
+		}
+	}
+#endif
+
+	irq_unlock(key);
+
+	return 0;
+}
+
+static int dma_sam0_resume(const struct device *dev, uint32_t channel)
+{
+	unsigned int key = irq_lock();
+
+	ARG_UNUSED(dev);
+
+#ifdef DMAC_CHID_ID
+	DMA_REGS->CHID.reg = channel;
+	DMA_REGS->CHCTRLB.reg = (DMA_REGS->CHCTRLB.reg & ~DMAC_CHCTRLB_CMD_Msk) |
+				DMAC_CHCTRLB_CMD_RESUME;
+#else
+	DMA_REGS->Channel[channel].CHCTRLB.reg = DMAC_CHCTRLB_CMD_RESUME;
+#endif
+
+	irq_unlock(key);
+
+	return 0;
+}
+
 static int dma_sam0_stop(const struct device *dev, uint32_t channel)
 {
 	unsigned int key = irq_lock();
@@ -469,6 +526,8 @@ static DEVICE_API(dma, dma_sam0_api) = {
 	.config = dma_sam0_config,
 	.start = dma_sam0_start,
 	.stop = dma_sam0_stop,
+	.suspend = dma_sam0_suspend,
+	.resume = dma_sam0_resume,
 	.reload = dma_sam0_reload,
 	.get_status = dma_sam0_get_status,
 };
