@@ -263,9 +263,19 @@ inval:
 
 static int dma_sam0_start(const struct device *dev, uint32_t channel)
 {
+	struct dma_sam0_data *data = dev->data;
 	unsigned int key = irq_lock();
 
-	ARG_UNUSED(dev);
+	/*
+	 * The write-back descriptor is only updated by the controller once a
+	 * beat has been transferred. Seed it so that dma_get_status() on a
+	 * channel that has not moved any data yet reports the full block as
+	 * pending instead of a stale count from a previous transfer.
+	 */
+	if (channel < DMAC_CH_NUM) {
+		data->descriptors_wb[channel].BTCNT.reg =
+			data->descriptors[channel].BTCNT.reg;
+	}
 
 #ifdef DMAC_CHID_ID
 	DMA_REGS->CHID.reg = channel;

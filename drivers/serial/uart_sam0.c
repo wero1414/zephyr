@@ -282,7 +282,8 @@ static void uart_sam0_dma_rx_done(const struct device *dma_dev, void *arg,
 	 * reception.  This also catches the case of DMA completion during
 	 * timeout handling.
 	 */
-	if (dev_data->rx_timeout_time != SYS_FOREVER_US) {
+	if (!IS_ENABLED(CONFIG_UART_SAM0_ASYNC_RX_CONTINUOUS) &&
+	    dev_data->rx_timeout_time != SYS_FOREVER_US) {
 		dev_data->rx_waiting_for_irq = true;
 		regs->INTENSET.reg = SERCOM_USART_INTENSET_RXC;
 		irq_unlock(key);
@@ -291,6 +292,12 @@ static void uart_sam0_dma_rx_done(const struct device *dma_dev, void *arg,
 
 	/* Otherwise, start the transfer immediately. */
 	dma_start(cfg->dma_dev, cfg->rx_dma_channel);
+
+	if (IS_ENABLED(CONFIG_UART_SAM0_ASYNC_RX_CONTINUOUS) &&
+	    dev_data->rx_timeout_time != SYS_FOREVER_US) {
+		k_work_reschedule(&dev_data->rx_timeout_work,
+				  K_USEC(dev_data->rx_timeout_chunk));
+	}
 
 	struct uart_event evt = {
 		.type = UART_RX_BUF_REQUEST,
@@ -301,6 +308,57 @@ static void uart_sam0_dma_rx_done(const struct device *dma_dev, void *arg,
 	irq_unlock(key);
 }
 
+#if CONFIG_UART_SAM0_ASYNC_RX_CONTINUOUS
+/*
+ * Continuous mode: the DMA channel is only paused for the few cycles needed
+ * to read its progress, then restarted immediately. Received data is
+ * flushed to the application every timeout/4 tick. This avoids the byte
+ * loss of the default mode, which stops the DMA on every tick and re-arms
+ * it from the next RXC interrupt (too slow above ~250 kbaud on a SERCOM,
+ * which has no RX FIFO).
+ */
+static void uart_sam0_rx_timeout(struct k_work *work)
+{
+	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+	struct uart_sam0_dev_data *dev_data = CONTAINER_OF(dwork,
+							   struct uart_sam0_dev_data, rx_timeout_work);
+	const struct uart_sam0_dev_cfg *const cfg = dev_data->cfg;
+	SercomUsart * const regs = cfg->regs;
+	struct dma_status st;
+	unsigned int key = irq_lock();
+
+	if (dev_data->rx_len == 0U) {
+		irq_unlock(key);
+		return;
+	}
+
+	dma_stop(cfg->dma_dev, cfg->rx_dma_channel);
+	if (dma_get_status(cfg->dma_dev, cfg->rx_dma_channel, &st) != 0 ||
+	    st.pending_length == 0U) {
+		/* Buffer complete: the DMA ISR is pending and will restart */
+		irq_unlock(key);
+		return;
+	}
+	if (st.pending_length > dev_data->rx_len) {
+		/* Inconsistent write-back: assume nothing was transferred */
+		st.pending_length = dev_data->rx_len;
+	}
+
+	size_t rx_processed = dev_data->rx_len - st.pending_length;
+
+	dma_reload(cfg->dma_dev, cfg->rx_dma_channel,
+		   (uint32_t)(&(regs->DATA.reg)),
+		   (uint32_t)(dev_data->rx_buf + rx_processed),
+		   st.pending_length);
+	dma_start(cfg->dma_dev, cfg->rx_dma_channel);
+
+	uart_sam0_notify_rx_processed(dev_data, rx_processed);
+
+	k_work_reschedule(&dev_data->rx_timeout_work,
+			  K_USEC(dev_data->rx_timeout_chunk));
+	irq_unlock(key);
+}
+#else
 static void uart_sam0_rx_timeout(struct k_work *work)
 {
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
@@ -383,6 +441,7 @@ static void uart_sam0_rx_timeout(struct k_work *work)
 
 	irq_unlock(key);
 }
+#endif /* CONFIG_UART_SAM0_ASYNC_RX_CONTINUOUS */
 
 #endif
 
@@ -1053,7 +1112,7 @@ static int uart_sam0_rx_enable(const struct device *dev, uint8_t *buf,
 			    (uint32_t)(&(regs->DATA.reg)),
 			    (uint32_t)buf, len);
 	if (retval != 0) {
-		return retval;
+		goto err;
 	}
 
 	dev_data->rx_buf = buf;
@@ -1064,7 +1123,26 @@ static int uart_sam0_rx_enable(const struct device *dev, uint8_t *buf,
 	dev_data->rx_timeout_time = timeout;
 	dev_data->rx_timeout_chunk = MAX(timeout / 4U, 1);
 
-	regs->INTENSET.reg = SERCOM_USART_INTENSET_RXC;
+	if (IS_ENABLED(CONFIG_UART_SAM0_ASYNC_RX_CONTINUOUS) &&
+	    timeout != SYS_FOREVER_US) {
+		dev_data->rx_waiting_for_irq = false;
+		dma_start(cfg->dma_dev, cfg->rx_dma_channel);
+		k_work_reschedule(&dev_data->rx_timeout_work,
+				  K_USEC(dev_data->rx_timeout_chunk));
+
+		/* Reception started: ask for the next buffer now, as the
+		 * RXC interrupt path would have done.
+		 */
+		if (dev_data->async_cb) {
+			struct uart_event evt = {
+				.type = UART_RX_BUF_REQUEST,
+			};
+
+			dev_data->async_cb(dev, &evt, dev_data->async_cb_data);
+		}
+	} else {
+		regs->INTENSET.reg = SERCOM_USART_INTENSET_RXC;
+	}
 
 	irq_unlock(key);
 	return 0;
@@ -1127,7 +1205,8 @@ static int uart_sam0_rx_disable(const struct device *dev)
 
 
 	if (dma_get_status(cfg->dma_dev, cfg->rx_dma_channel,
-			   &st) == 0 && st.pending_length != 0U) {
+			   &st) == 0 && st.pending_length != 0U &&
+	    st.pending_length <= dev_data->rx_len) {
 		size_t rx_processed = dev_data->rx_len - st.pending_length;
 
 		uart_sam0_notify_rx_processed(dev_data, rx_processed);

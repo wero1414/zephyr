@@ -19,3 +19,15 @@ config UART_SAM0_ASYNC
 	depends on DMA_SAM0
 	depends on UART_SAM0
 	depends on UART_ASYNC_API
+
+config UART_SAM0_ASYNC_RX_CONTINUOUS
+	bool "Keep the RX DMA running between timeout ticks"
+	depends on UART_SAM0_ASYNC
+	help
+	  In the default async RX mode the driver stops the DMA channel on
+	  every timeout tick and re-arms it from the next RXC interrupt, which
+	  loses bytes at high baud rates because the SERCOM has no RX FIFO.
+	  With this option the DMA is paused only long enough to read its
+	  progress and restarted at once; received bytes are delivered to the
+	  application every timeout/4 while reception is enabled. Costs one
+	  work item per tick.
