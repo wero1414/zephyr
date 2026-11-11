@@ -1489,8 +1489,18 @@ static int sx126x_set_fsk_sync_word(const struct device *dev,
 static int sx126x_set_fsk_whitening_seed(const struct device *dev, uint16_t seed)
 {
 	uint8_t buf[2];
+	int ret;
 
-	buf[0] = (seed >> 8) & 0x01;
+	/* Only bit 0 of the MSB register is the seed. The datasheet (section 13,
+	 * register 0x06B8, reset 0xX1) forbids changing the 7 MSB: clearing
+	 * them (bit 5 is set at reset) stops GFSK RX from ever detecting sync.
+	 */
+	ret = sx126x_hal_read_regs(dev, SX126X_REG_FSK_WHITENING_MSB, buf, 1);
+	if (ret < 0) {
+		return ret;
+	}
+
+	buf[0] = (buf[0] & 0xFE) | ((seed >> 8) & 0x01);
 	buf[1] = seed & 0xFF;
 
 	return sx126x_hal_write_regs(dev, SX126X_REG_FSK_WHITENING_MSB, buf, 2);
